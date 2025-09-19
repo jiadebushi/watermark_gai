@@ -183,7 +183,32 @@ def draw_text_watermark(
         base = image.copy()
 
     draw = ImageDraw.Draw(base)
-    text_w, text_h = draw.textsize(text, font=font)
+
+    def _measure_text() -> Tuple[int, int]:
+        # Prefer modern APIs when available
+        if hasattr(draw, "textbbox"):
+            try:
+                left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+                return right - left, bottom - top
+            except Exception:
+                pass
+        # Pillow >=8 font.getbbox
+        if hasattr(font, "getbbox"):
+            try:
+                left, top, right, bottom = font.getbbox(text)
+                return right - left, bottom - top
+            except Exception:
+                pass
+        # Legacy fallbacks
+        if hasattr(font, "getsize"):
+            try:
+                return font.getsize(text)  # type: ignore[return-value]
+            except Exception:
+                pass
+        # Last resort
+        return (100, 30)
+
+    text_w, text_h = _measure_text()
     x, y = compute_position(base.size, (text_w, text_h), position_key)
 
     # Optional stroke for readability
@@ -215,12 +240,15 @@ def process_targets(
 
     processed = 0
     skipped = 0
+    skipped_reasons: dict[str, int] = {}
     for img_path in targets:
         try:
             with Image.open(img_path) as img:
                 date_text = extract_exif_date(img)
                 if not date_text:
-                    print(f"跳过（无拍摄时间）：{img_path.name}")
+                    reason = "无拍摄时间"
+                    print(f"跳过（{reason}）：{img_path.name}")
+                    skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                     skipped += 1
                     continue
 
@@ -238,7 +266,11 @@ def process_targets(
         except Exception as exc:
             print(f"处理失败 {img_path.name}（{exc.__class__.__name__}）：{exc}")
 
-    print(f"完成。处理成功 {processed} 张，跳过 {skipped} 张。输出目录：{output_dir}")
+    if skipped_reasons:
+        reasons_str = "；".join([f"{k} {v} 张" for k, v in skipped_reasons.items()])
+        print(f"完成。处理成功 {processed} 张，跳过 {skipped} 张（原因：{reasons_str}）。输出目录：{output_dir}")
+    else:
+        print(f"完成。处理成功 {processed} 张，跳过 {skipped} 张。输出目录：{output_dir}")
 
 
 def normalize_color_input(user_input: str) -> str:
