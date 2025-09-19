@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 
 from PIL import Image, ImageDraw, ImageFont, ImageColor
 
@@ -9,14 +9,22 @@ from PIL import Image, ImageDraw, ImageFont, ImageColor
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 
-def prompt_user_inputs() -> Tuple[Path, int, str, str]:
-    """Prompt user for required inputs via command line."""
+def prompt_user_inputs() -> Tuple[Path, bool, int, str, str]:
+    """Prompt user for required inputs via command line.
+
+    Returns:
+        path: 用户输入的路径（文件或目录）
+        is_dir: 是否为目录
+        font_size: 字体大小
+        color: 颜色（中文/英文/十六进制）
+        position_key_cn: 位置中文键
+    """
     while True:
-        input_path_str = input("请输入一个图片文件路径: ").strip().strip('"')
+        input_path_str = input("请输入一个图片文件路径或一个图片文件夹路径: ").strip().strip('"')
         input_path = Path(input_path_str)
-        if input_path.exists() and input_path.is_file():
+        if input_path.exists() and (input_path.is_file() or input_path.is_dir()):
             break
-        print("路径无效，请重新输入一个存在的图片文件路径。")
+        print("路径无效，请重新输入存在的图片文件或目录路径。")
 
     # font size
     while True:
@@ -31,23 +39,24 @@ def prompt_user_inputs() -> Tuple[Path, int, str, str]:
 
     # color
     while True:
-        color_str = input("请输入颜色（例如 white、black、#FFFFFF）: ").strip()
+        color_str = input("请输入颜色（支持中文/英文/十六进制，例如 白色、white、#FFFFFF）: ").strip()
         try:
             # Validate color
-            ImageColor.getrgb(color_str)
+            # 先尝试中文/英文颜色名映射
+            _ = ImageColor.getrgb(normalize_color_input(color_str))
             break
         except ValueError:
-            print("无效的颜色，请输入常见颜色名或十六进制色值，例如 #FFFFFF。")
+            print("无效的颜色，请输入常见颜色名（中文或英文）或十六进制色值，例如 #FFFFFF。")
 
     # position
-    positions = {"left_top", "center", "right_bottom"}
+    valid_positions_cn = "、".join(["左上角", "左下角", "右上角", "右下角", "中间", "上边缘", "下边缘"])
     while True:
-        pos_str = input("请输入位置（left_top / center / right_bottom）: ").strip().lower()
-        if pos_str in positions:
+        pos_str_cn = input(f"请输入位置（{valid_positions_cn}）: ").strip()
+        if pos_str_cn in POSITION_CN_TO_KEY:
             break
-        print("无效的位置，请从 left_top / center / right_bottom 中选择。")
+        print(f"无效的位置，请从 {valid_positions_cn} 中选择。")
 
-    return input_path, font_size_val, color_str, pos_str
+    return input_path, input_path.is_dir(), font_size_val, color_str, pos_str_cn
 
 
 def ensure_output_dir(original_dir: Path) -> Path:
@@ -144,10 +153,18 @@ def compute_position(
 
     if position_key == "left_top":
         return margin, margin
-    if position_key == "center":
-        return (img_w - text_w) // 2, (img_h - text_h) // 2
+    if position_key == "left_bottom":
+        return margin, max(img_h - text_h - margin, 0)
+    if position_key == "right_top":
+        return max(img_w - text_w - margin, 0), margin
     if position_key == "right_bottom":
         return max(img_w - text_w - margin, 0), max(img_h - text_h - margin, 0)
+    if position_key == "center":
+        return (img_w - text_w) // 2, (img_h - text_h) // 2
+    if position_key == "top_center":
+        return (img_w - text_w) // 2, margin
+    if position_key == "bottom_center":
+        return (img_w - text_w) // 2, max(img_h - text_h - margin, 0)
     # default fallback
     return margin, margin
 
@@ -182,23 +199,23 @@ def draw_text_watermark(
     return base
 
 
-def process_directory(
-    directory: Path,
+def process_targets(
+    base_dir: Path,
+    targets: List[Path],
     font_size: int,
     color: str,
     position_key: str,
 ) -> None:
-    output_dir = ensure_output_dir(directory)
+    output_dir = ensure_output_dir(base_dir)
     font = try_load_truetype_font(font_size)
 
-    images = list(list_images_in_dir(directory))
-    if not images:
-        print("该目录下未发现可处理的图片（jpg/jpeg/png）。")
+    if not targets:
+        print("未发现可处理的图片（jpg/jpeg/png）。")
         return
 
     processed = 0
     skipped = 0
-    for img_path in images:
+    for img_path in targets:
         try:
             with Image.open(img_path) as img:
                 date_text = extract_exif_date(img)
@@ -219,15 +236,64 @@ def process_directory(
                 processed += 1
                 print(f"已保存：{out_path}")
         except Exception as exc:
-            print(f"处理失败 {img_path.name}: {exc}")
+            print(f"处理失败 {img_path.name}（{exc.__class__.__name__}）：{exc}")
 
     print(f"完成。处理成功 {processed} 张，跳过 {skipped} 张。输出目录：{output_dir}")
 
 
+def normalize_color_input(user_input: str) -> str:
+    """Map Chinese color names to English/hex; pass through known values."""
+    s = user_input.strip().lower()
+    cn_to_en = {
+        "白": "white", "白色": "white",
+        "黑": "black", "黑色": "black",
+        "红": "red", "红色": "red",
+        "绿": "green", "绿色": "green",
+        "蓝": "blue", "蓝色": "blue",
+        "黄": "yellow", "黄色": "yellow",
+        "青": "cyan", "青色": "cyan",
+        "洋红": "magenta", "品红": "magenta",
+        "灰": "gray", "灰色": "gray",
+        "橙": "orange", "橙色": "orange",
+        "紫": "purple", "紫色": "purple",
+        "粉": "pink", "粉色": "pink",
+        "棕": "brown", "棕色": "brown", "褐色": "brown",
+    }
+    if s in cn_to_en:
+        return cn_to_en[s]
+    # English color names or hex remain as-is
+    return user_input
+
+
+# Chinese position to internal key
+POSITION_CN_TO_KEY = {
+    "左上角": "left_top",
+    "左下角": "left_bottom",
+    "右上角": "right_top",
+    "右下角": "right_bottom",
+    "中间": "center",
+    "上边缘": "top_center",
+    "下边缘": "bottom_center",
+}
+
+
 def main() -> None:
-    input_path, font_size, color, position_key = prompt_user_inputs()
-    directory = input_path.parent
-    process_directory(directory, font_size, color, position_key)
+    path, is_dir, font_size, color_input, position_cn = prompt_user_inputs()
+    position_key = POSITION_CN_TO_KEY.get(position_cn, "center")
+    color = normalize_color_input(color_input)
+
+    if is_dir:
+        base_dir = path
+        targets = list(list_images_in_dir(base_dir))
+    else:
+        base_dir = path.parent
+        targets = [path] if path.suffix.lower() in SUPPORTED_EXTENSIONS else []
+
+    if not targets and not is_dir:
+        print("输入的文件扩展名不受支持（仅支持 jpg/jpeg/png）。")
+        return
+
+    process_targets(base_dir, targets, font_size, color, position_key)
 
 
 if __name__ == "__main__":
